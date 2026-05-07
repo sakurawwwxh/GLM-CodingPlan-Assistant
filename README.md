@@ -1,21 +1,19 @@
 # 智谱 GLM Coding 抢购助手
 
-Tampermonkey 脚本, 自动化抢购 bigmodel.cn GLM Coding 套餐.
+Tampermonkey 脚本，自动化抢购 [bigmodel.cn](https://www.bigmodel.cn/glm-coding) GLM Coding 套餐。
 
 ## 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展 (Chrome / Firefox / Edge)
 2. 打开 Tampermonkey 控制台 → `+ 新建脚本`
-3. 复制 `glm-rush-assistant.user.js` 全部内容粘贴 → 保存
+3. 复制 `glm-assistant.js` 全部内容粘贴 → `Ctrl+S` 保存
 
 ## 使用步骤
 
 1. 打开 `bigmodel.cn/glm-coding`
-2. 右上角面板选择套餐: `[包月][包季✓][包年] × [Lite✓][Pro][Max]`
-3. 设定定时时间 (可选)
-4. 点 `▶ 主动抢购` 或按 `Alt+S`
-
-脚本自动完成: 打开页面 → 点 tab → 点购买按钮 → 拦截请求 → 并发重试 → 成功拉起支付
+2. 右上角面板选择套餐: `[包月][包季][包年]` × `[Lite][Pro][Max]`
+3. 设定定时时间，或直接点 `▶ 主动抢购` / 按 `Alt+S`
+4. 抢到后自动拉起支付弹窗，手动完成付款
 
 ## 快捷键
 
@@ -29,34 +27,40 @@ Tampermonkey 脚本, 自动化抢购 bigmodel.cn GLM Coding 套餐.
 
 | 配置 | 默认值 | 说明 |
 |------|--------|------|
-| 并发 | 5 | 普通模式并发数 |
-| 极速 | 10 | 极速模式并发数 (前5秒) |
-| 上限 | 2000 | 最大重试次数 |
+| 并发 | 5 | 普通模式并发路数 |
+| 极速 | 15 | 极速模式并发路数 (前5秒) |
+| 上限 | 3000 | 最大重试次数 |
 | 定时 | 10:00:00 | 每日自动抢购时间 |
 
-## 套餐选择
+## 特性
 
-套餐类型: 包月 / 包季 / 包年
-套餐规格: Lite / Pro / Max
+- **直接 API 请求**: 无需点按钮，直接构造 `batch-preview` → `check` 链路
+- **并发重试引擎**: 前 5 秒极速爆发（15路），之后稳定并发（5路），自适应退避
+- **多路竞速**: 任意一路先成功即中止其余请求
+- **服务器时间同步**: 通过响应头 Date 校准北京时间，定时更精准
+- **弹窗恢复**: 抢到若弹窗被吞，自动拦截 check 接口恢复支付页
+- **反售罄补丁**: 拦截页面 API 响应，修正 `isSoldOut`/`isServerBusy` 状态，确保按钮可点（XHR + Vue 数据 + DOM 三层）
+- **配置持久化**: 面板设置自动存 localStorage
+- **Shadow DOM 面板**: 样式隔离，不干扰原页面
 
-选择后自动对应页面上的 `连续包月/连续包季/连续包年` tab 和对应套餐卡片.
+## v5.4 改动
 
-## 反检测 (v5.1)
+- **WAF 友好**: 移除请求体随机噪声字段、固定 UA、去除随机化请求头、不再预热 PREVIEW 接口。降低被 WAF 拦截的风险
+- **Vue 补丁收敛**: 只修正 `isSoldOut`/`isServerBusy`/`soldOut`，不再触碰 `disabled`/`canBuy` 等业务字段，避免套餐选择栏消失
+- **preheat 修复**: 不再对 PREVIEW 发 HEAD 请求
 
-- UA 池: 9个真实浏览器 UA, 每30秒随机切换
-- 请求体随机化: 加毫秒时间戳/随机串
-- 批次打散: batch 内请求乱序发出
-- Human-like 延迟: 50-800ms 随机间隔
-- Referer / Origin: 模拟正常导航
-- Accept / Cache-Control: 随机变化
+## 已知限制
 
-## 注意事项
-
-- **图片验证码**: 无法自动处理, 需手动完成
-- **支付**: 弹窗出现后需手动完成支付
+- **图片验证码**: 无法自动处理，需手动完成
+- **支付**: 弹窗出现后手动扫码/付款
 - **登录态**: 过期后需重新登录 bigmodel.cn
-- **定时抢购**: 定时到点后实时构造请求, 不过期
+- **WAF 封 IP**: 频繁并发可能触发 IP 级别封禁，需换 IP / 等冷却
 
 ## 文件
 
 - `glm-assistant.js` — Tampermonkey 脚本源码
+- `test.js` — 单元测试
+
+## License
+
+MIT

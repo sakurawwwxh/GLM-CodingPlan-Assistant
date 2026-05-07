@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         智谱 GLM Coding 抢购助手 v5.1
+// @name         智谱 GLM Coding 抢购助手 v5.4
 // @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  并发重试 + 自适应间隔 + 反检测增强(v5.1) + check校验 + 弹窗恢复 + 定时触发 + 配置持久化 + 套餐自动选择
+// @version      5.4
+// @description  低特征(v5.4) + 并发重试 + WAF友好 + check校验 + 弹窗恢复 + 定时触发 + 配置持久化 + 直接请求
 // @author       Assistant
 // @match        *://www.bigmodel.cn/*
 // @match        *://bigmodel.cn/*
@@ -18,17 +18,17 @@
     // ═══════════════════════════════════════════
     const DEFAULT_CFG = {
         concurrency: 5,       // 并发路数 (普通模式)
-        turboConcurrency: 10, // 极速模式并发路数
+        turboConcurrency: 15, // 极速模式并发路数
         turboSec: 5,          // 极速模式持续秒数
-        maxRetry: 2000,       // 最大重试次数
-        burstCount: 20,       // 前N次零延迟爆发
-        fastDelay: 30,        // 爆发后的快速间隔
-        slowDelay: 100,       // 后期随机间隔中值
-        jitter: 0.3,          // 间隔随机抖动 ±30%
+        maxRetry: 3000,       // 最大重试次数
+        burstCount: 40,       // 前N次零延迟爆发
+        fastDelay: 15,        // 爆发后的快速间隔
+        slowDelay: 50,        // 后期随机间隔中值
+        jitter: 0.2,          // 间隔随机抖动 ±20%
         recoveryMax: 3,       // 弹窗恢复最大次数
         logMax: 100,          // 日志条数上限
         rushTime: '10:00:00',     // 每天抢购时间 (北京时间)
-        PREVIEW: '/api/biz/pay/preview',
+        PREVIEW: '/api/biz/pay/batch-preview',
         CHECK: '/api/biz/pay/check',
         packageType: 'quarterly', // monthly | quarterly | yearly
         packageTier: 'lite',       // lite | pro | max
@@ -125,13 +125,8 @@
     ];
 
     let _currentUA = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
-    let _lastUASwitch = 0;
 
     function getUA() {
-        if (Date.now() - _lastUASwitch > 30000) {
-            _currentUA = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
-            _lastUASwitch = Date.now();
-        }
         return _currentUA;
     }
 
@@ -140,9 +135,9 @@
     // ═══════════════════════════════════════════
     function humanLikeDelay() {
         if (Math.random() < 0.8) {
-            return 50 + Math.random() * 150;
+            return 20 + Math.random() * 80;
         }
-        return 200 + Math.random() * 600;
+        return 100 + Math.random() * 200;
     }
 
     async function fireWithScatter(promises) {
@@ -153,7 +148,8 @@
         }
         const results = new Array(promises.length);
         await Promise.all(indices.map(async (idx, offset) => {
-            await sleep(humanLikeDelay() * offset);
+            const delay = Math.min(humanLikeDelay(), 100) * Math.min(offset, 2);
+            await sleep(delay);
             try {
                 results[idx] = await promises[idx];
             } catch (e) {
@@ -164,24 +160,8 @@
     }
 
     function scrambleBody(body) {
-        if (!body) return body;
-        try {
-            const obj = JSON.parse(body);
-            if (Math.random() < 0.3) {
-                obj._t = Date.now();
-            }
-            if (Math.random() < 0.2) {
-                obj._r = Math.random().toString(36).slice(2, 8);
-            }
-            for (const key of Object.keys(obj)) {
-                if (obj[key] === '' || obj[key] === null) {
-                    if (Math.random() < 0.3) delete obj[key];
-                }
-            }
-            return JSON.stringify(obj);
-        } catch {
-            return body;
-        }
+        // WAF 会检测异常字段, 不再添加噪声
+        return body;
     }
 
     // ═══════════════════════════════════════════
@@ -201,11 +181,6 @@
         if (obj.isSoldOut === true) obj.isSoldOut = false;
         if (obj.soldOut === true) obj.soldOut = false;
         if (obj.isServerBusy === true) obj.isServerBusy = false;
-        if (obj.disabled === true) {
-            if (obj.price !== undefined && (obj.productId || obj.title)) {
-                obj.disabled = false;
-            }
-        }
         if (obj.stock === 0) obj.stock = 999;
         for (const k of Object.keys(obj)) {
             if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
@@ -221,28 +196,19 @@
 
     async function singleAttempt(url, opts, attemptNum) {
         try {
-            const randHeaders = { ...opts.headers };
-            randHeaders['User-Agent'] = getUA();
-            randHeaders['X-Request-Id'] = Math.random().toString(36).slice(2, 15);
-            randHeaders['X-Timestamp'] = String(Date.now());
-            const q = (0.5 + Math.random() * 0.5).toFixed(1);
-            randHeaders['Accept-Language'] = `zh-CN,zh;q=${q},en;q=${(q * 0.7).toFixed(1)}`;
-            randHeaders['Referer'] = `${location.origin}/glm-coding`;
-            randHeaders['Origin'] = location.origin;
-            randHeaders['X-Requested-With'] = 'XMLHttpRequest';
-            if (Math.random() < 0.5) {
-                randHeaders['Accept'] = 'application/json, text/plain, */*';
-            } else {
-                randHeaders['Accept'] = '*/*';
-            }
-            randHeaders['Cache-Control'] = Math.random() < 0.5 ? 'no-cache' : 'max-age=0';
+            const reqHeaders = { ...opts.headers };
+            reqHeaders['User-Agent'] = _currentUA;
+            reqHeaders['Accept-Language'] = 'zh-CN,zh;q=0.9,en;q=0.7';
+            reqHeaders['Referer'] = `${location.origin}/glm-coding`;
+            reqHeaders['Origin'] = location.origin;
+            reqHeaders['Accept'] = 'application/json, text/plain, */*';
 
             let body = opts.body;
             if (opts.method === 'POST' && body) {
                 body = scrambleBody(body);
             }
 
-            const resp = await _fetch(url, { ...opts, body, headers: randHeaders, credentials: 'include' });
+            const resp = await _fetch(url, { ...opts, body, headers: reqHeaders, credentials: 'include' });
 
             if (resp.status === 401 || resp.status === 403) {
                 return { ok: false, reason: `HTTP ${resp.status} 会话过期`, attempt: attemptNum };
@@ -432,6 +398,7 @@
             };
             setState({ captured });
             try { sessionStorage.setItem('glm_rush_captured', JSON.stringify(captured)); } catch {}
+            log(`[捕获请求] ${captured.method} body=${typeof captured.body === 'string' ? captured.body.substring(0, 200) : captured.body}`);
 
             if (state.status === 'success' && state.lastSuccess) {
                 log('已抢到, 返回成功响应');
@@ -459,7 +426,7 @@
                 return _originalFetch.apply(this, [input, init]);
             }
 
-            log('已捕获请求参数, 等待抢购时间...');
+            log('已构造请求, 等待抢购时间...');
             autoScheduleIfNeeded();
             return _originalFetch.apply(this, [input, init]);
         }
@@ -493,11 +460,44 @@
     XMLHttpRequest.prototype.send = function (body) {
         const url = this._u;
 
+        // 非抢购 API: 拦截响应, patch 售罄标记
+        if (typeof url === 'string' && !url.includes(CFG.PREVIEW) && !url.includes(CFG.CHECK)) {
+            const origReady = this.onreadystatechange;
+            const origLoad = this.onload;
+            const self = this;
+            const patchResponse = function() {
+                if (self.readyState === 4 && self.responseText) {
+                    try {
+                        const data = JSON.parse(self.responseText);
+                        patchSoldOut(data);
+                        const patched = JSON.stringify(data);
+                        Object.defineProperty(self, 'responseText', {
+                            get: function() { return patched; },
+                            configurable: true, enumerable: true,
+                        });
+                        Object.defineProperty(self, 'response', {
+                            get: function() { return patched; },
+                            configurable: true, enumerable: true,
+                        });
+                    } catch {}
+                }
+            };
+            this.onreadystatechange = function(e) {
+                patchResponse();
+                if (origReady) return origReady.call(this, e);
+            };
+            this.onload = function(e) {
+                patchResponse();
+                if (origLoad) return origLoad.call(this, e);
+            };
+        }
+
         if (typeof url === 'string' && url.includes(CFG.PREVIEW)) {
             const self = this;
             const captured = { url, method: this._m, body, headers: this._h || {} };
             setState({ captured });
             try { sessionStorage.setItem('glm_rush_captured', JSON.stringify(captured)); } catch {}
+            log(`[捕获请求-XHR] ${captured.method} body=${typeof captured.body === 'string' ? captured.body.substring(0, 200) : captured.body}`);
 
             if (state.status === 'success' && state.lastSuccess) {
                 log('已抢到, 返回成功响应 (XHR)');
@@ -516,11 +516,10 @@
             if (state.proactive || state.status === 'retrying') {
                 log('抢购中, 启动重试 (XHR)...');
                 const extraHeaders = {
-                    'User-Agent': getUA(),
+                    'User-Agent': _currentUA,
                     'Referer': `${location.origin}/glm-coding`,
                     'Origin': location.origin,
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Accept': Math.random() < 0.5 ? 'application/json, text/plain, */*' : '*/*',
+                    'Accept': 'application/json, text/plain, */*',
                 };
                 const mergedHeaders = { ...(this._h || {}), ...extraHeaders };
                 retry(url, { method: this._m, body, headers: mergedHeaders }).then(result => {
@@ -529,7 +528,7 @@
                 return;
             }
 
-            log('已捕获请求参数, 等待抢购时间...');
+            log('已构造请求, 等待抢购时间...');
             autoScheduleIfNeeded();
             return _xhrSend.call(this, body);
         }
@@ -575,55 +574,20 @@
     async function autoGrab() {
         log(`自动抢购启动: ${TAB_MAP[CFG.packageType]} + ${TIER_MAP[CFG.packageTier]}`);
 
-        return new Promise((resolve) => {
-            const targetUrl = `${location.origin}/glm-coding`;
-            log(`跳转页面: ${targetUrl}`);
+        // 构造请求体,直接调用batch-preview API
+        const url = `${location.origin}${CFG.PREVIEW}`;
+        const body = JSON.stringify({ invitationCode: "" });
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': `${location.origin}/glm-coding`,
+            'Origin': location.origin,
+        };
 
-            const onLoad = () => {
-                document.removeEventListener('pjax:success', onLoad);
-                document.removeEventListener('DOMContentLoaded', onLoad);
-                setTimeout(() => performAutoClick(), 1500);
-            };
+        log(`直接发起请求: ${url}`);
+        setState({ captured: { url, method: 'POST', body, headers } });
 
-            document.addEventListener('pjax:success', onLoad);
-            document.addEventListener('DOMContentLoaded', onLoad);
-
-            stopRequested = false;
-            location.href = targetUrl;
-
-            const timeout = setTimeout(() => {
-                if (!state.captured) {
-                    log('自动捕获超时, 请手动点一次购买按钮', 'warn');
-                }
-                resolve();
-            }, 5000);
-
-            function performAutoClick() {
-                clearTimeout(timeout);
-
-                const tabName = TAB_MAP[CFG.packageType];
-                log(`点击套餐tab: ${tabName}`);
-                const tabEl = findTabElement(tabName);
-                if (tabEl) {
-                    tabEl.click();
-                } else {
-                    log(`未找到tab: ${tabName}`, 'warn');
-                }
-
-                setTimeout(() => {
-                    const tierName = TIER_MAP[CFG.packageTier];
-                    log(`点击套餐按钮: ${tierName} 特惠订阅`);
-                    const btn = findTierButton(tierName);
-                    if (btn) {
-                        btn.click();
-                    } else {
-                        log(`未找到套餐按钮: ${tierName}`, 'warn');
-                        log('请手动点击购买按钮启动抢购', 'warn');
-                    }
-                    resolve();
-                }, 800);
-            }
-        });
+        return { url, method: 'POST', body, headers };
     }
 
     function findTabElement(tabName) {
@@ -815,14 +779,13 @@
         }
 
         if (!state.captured) {
-            log('无捕获请求, 启动自动套餐选择...');
-            await autoGrab();
-            await sleep(2000);
+            log('无捕获请求, 直接构造请求...');
+            const req = await autoGrab();
             if (!state.captured) {
-                log('自动捕获失败, 请手动点一次购买按钮', 'warn');
+                log('构造请求失败', 'warn');
                 return;
             }
-            log('已自动捕获请求, 开始抢购!');
+            log('已构造请求, 开始抢购!');
         }
 
         setState({ proactive: true });
@@ -862,7 +825,7 @@
     async function syncServerTime() {
         try {
             const t0 = Date.now();
-            const resp = await _originalFetch(location.origin + '/api/biz/pay/check?bizId=sync', { credentials: 'include' }).catch(() => null);
+            const resp = await _originalFetch(location.origin + CFG.CHECK + '?bizId=sync', { credentials: 'include' }).catch(() => null);
             const t1 = Date.now();
             const rtt = t1 - t0;
 
@@ -928,11 +891,11 @@
         const ms = target.getTime() - getServerNow();
         log(`定时: ${timeStr} (${Math.ceil(ms / 1000)}秒后, 北京时间)`);
 
-        if (ms > 4000) {
+        if (ms > 6000) {
             setTimeout(() => {
-                log('定时前3秒, 自动预热...');
+                log('定时前5秒, 自动预热...');
                 preheat();
-            }, Math.max(0, ms - 3000));
+            }, Math.max(0, ms - 5000));
         }
 
         const tid = setInterval(() => {
@@ -958,17 +921,13 @@
     async function preheat() {
         try {
             log('TCP预热中...');
-            for (let i = 0; i < 3; i++) {
-                const h = { 'User-Agent': getUA(), 'Referer': `${location.origin}/glm-coding` };
-                await _originalFetch(location.origin + '/api/biz/pay/check?bizId=preheat_' + i, { credentials: 'include', headers: h }).catch(() => {});
-                await sleep(200);
+            const promises = [];
+            for (let i = 0; i < 5; i++) {
+                const h = { 'User-Agent': _currentUA, 'Referer': `${location.origin}/glm-coding` };
+                promises.push(_originalFetch(location.origin + CFG.CHECK + '?bizId=preheat_' + i, { credentials: 'include', headers: h }).catch(() => {}));
             }
-            await _originalFetch(location.origin + CFG.PREVIEW, {
-                method: 'HEAD',
-                credentials: 'include',
-                headers: { 'User-Agent': getUA(), 'Referer': `${location.origin}/glm-coding` },
-            }).catch(() => {});
-            log('预热完成 (4次连接已建立)');
+            await Promise.all(promises);
+            log('预热完成 (5路并发连接已建立)');
         } catch { log('预热部分失败，不影响使用'); }
     }
 
@@ -995,25 +954,57 @@
         let attempts = 0;
         const tid = setInterval(() => {
             attempts++;
-            if (attempts > 30) { clearInterval(tid); return; }
+            if (attempts > 60) { clearInterval(tid); return; }
+            let patched = 0;
+
+            // 1. Vue 组件数据 patch — 只动售罄/繁忙, 不动 disabled/canBuy
             const app = document.querySelector('#app');
             const vue = app && app.__vue__;
-            if (!vue) return;
-            let patched = 0;
-            const walk = (vm, depth) => {
-                if (depth > 8) return;
-                if (vm.$data && vm.$data.isServerBusy === true) {
-                    vm.isServerBusy = false;
+            if (vue) {
+                const safeProps = ['isServerBusy', 'isSoldOut', 'soldOut'];
+                const walk = (vm, depth) => {
+                    if (depth > 6) return;
+                    for (const prop of safeProps) {
+                        if (vm.$data && vm.$data[prop] === true) {
+                            if (typeof vm.$set === 'function') vm.$set(vm, prop, false);
+                            else vm[prop] = false;
+                            patched++;
+                        }
+                        if (vm[prop] === true && !(vm.$data && vm.$data.hasOwnProperty && vm.$data.hasOwnProperty(prop))) {
+                            if (typeof vm.$set === 'function') vm.$set(vm, prop, false);
+                            else vm[prop] = false;
+                            patched++;
+                        }
+                    }
+                    for (const child of (vm.$children || [])) walk(child, depth + 1);
+                };
+                walk(vue, 0);
+            }
+
+            // 2. DOM 按钮直接修复 — 只动 disabled 的购买按钮
+            const buyBtns = document.querySelectorAll('.buy-btn, button.buy-btn[disabled]');
+            for (const btn of buyBtns) {
+                if (btn.disabled) { btn.disabled = false; btn.classList.remove('is-disabled', 'disabled'); patched++; }
+                const text = (btn.textContent || '').trim();
+                if (/售罄|补货|已抢完/.test(text)) {
+                    btn.textContent = '特惠订阅';
                     patched++;
                 }
-                for (const child of (vm.$children || [])) walk(child, depth + 1);
-            };
-            walk(vue, 0);
-            if (patched > 0) {
-                log(`已解除 isServerBusy (${patched}个组件)`);
-                clearInterval(tid);
             }
-        }, 500);
+
+            // 3. 移除售罄遮罩/标签
+            const soldOutTags = document.querySelectorAll('[class*="sold-out"], [class*="soldOut"]');
+            for (const el of soldOutTags) {
+                if (el.textContent && /售罄|已售/.test(el.textContent)) {
+                    el.style.display = 'none';
+                    patched++;
+                }
+            }
+
+            if (patched > 0 && attempts % 10 === 0) {
+                log(`反售罄patch: ${patched}处 (第${attempts}次)`);
+            }
+        }, 1000);
     }
 
     function forcePayDialog(responseData) {
@@ -1102,10 +1093,10 @@
 .keys{font-size:10px;color:#636e72;text-align:center;margin-top:6px}
 </style>
 <div class="panel">
-  <div class="hd" id="drag"><b>GLM v5.1</b><button class="mn" id="min">-</button></div>
+  <div class="hd" id="drag"><b>GLM v5.4</b><button class="mn" id="min">-</button></div>
   <div class="bd" id="bd">
     <div class="st st-idle" id="st">等待中</div>
-    <div class="cap" id="cap">${state.captured ? '已恢复上次捕获的请求' : '请先点一次购买按钮'}</div>
+    <div class="cap" id="cap">${state.captured ? '已恢复上次构造的请求' : '点击"主动抢购"直接开始'}</div>
 
     <div class="pkgs" id="pkgs">
       <div class="pkgs-label">套餐类型</div>
@@ -1197,8 +1188,8 @@
 
         _shadowRef = shadow;
 
-        log('v5.1 已加载 (反检测增强 + 套餐自动选择)');
-        if (state.captured) log('已恢复上次捕获的请求参数, 可直接设定时间');
+        log('v5.4 已加载 (极速优化 + 直接请求)');
+        if (state.captured) log('已恢复上次构造的请求, 可直接设定时间');
         log(`当前套餐: ${TAB_MAP[CFG.packageType]} + ${TIER_MAP[CFG.packageTier]}`);
         setupDialogWatcher();
 
@@ -1241,8 +1232,8 @@
             const capEl = $('cap');
             if (capEl) {
                 capEl.textContent = state.captured
-                    ? `已捕获: ${state.captured.method} ...${state.captured.url.split('?')[0].slice(-30)}`
-                    : '请先点一次购买按钮';
+                    ? `已构造: ${state.captured.method} ...${state.captured.url.split('?')[0].slice(-30)}`
+                    : '点击"主动抢购"直接开始';
             }
 
             const cntEl = $('s-cnt'); if (cntEl) cntEl.textContent = state.count;
@@ -1284,7 +1275,7 @@
     // ═══════════════════════════════════════════
     //  启动
     // ═══════════════════════════════════════════
-    console.log('[GLM] v5.1 已注入');
+    console.log('[GLM] v5.4 已注入');
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', createPanel);
     } else {
