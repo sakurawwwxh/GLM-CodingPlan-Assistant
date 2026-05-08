@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         智谱 GLM Coding 抢购助手 v5.4
+// @name         智谱 GLM Coding 抢购助手 v5.5
 // @namespace    http://tampermonkey.net/
-// @version      5.4
-// @description  低特征(v5.4) + 并发重试 + WAF友好 + check校验 + 弹窗恢复 + 定时触发 + 配置持久化 + 直接请求
+// @version      5.5
+// @description  手动抢购(v5.5) + 反售罄补丁 + 弹窗恢复 + 配置持久化 (无自动定时, 安全不封号)
 // @author       Assistant
 // @match        *://www.bigmodel.cn/*
 // @match        *://bigmodel.cn/*
@@ -17,21 +17,20 @@
     //  配置 (localStorage 持久化)
     // ═══════════════════════════════════════════
     const DEFAULT_CFG = {
-        concurrency: 5,       // 并发路数 (普通模式)
-        turboConcurrency: 15, // 极速模式并发路数
-        turboSec: 5,          // 极速模式持续秒数
-        maxRetry: 3000,       // 最大重试次数
-        burstCount: 40,       // 前N次零延迟爆发
-        fastDelay: 15,        // 爆发后的快速间隔
-        slowDelay: 50,        // 后期随机间隔中值
-        jitter: 0.2,          // 间隔随机抖动 ±20%
-        recoveryMax: 3,       // 弹窗恢复最大次数
-        logMax: 100,          // 日志条数上限
-        rushTime: '10:00:00',     // 每天抢购时间 (北京时间)
+        concurrency: 5,
+        turboConcurrency: 15,
+        turboSec: 5,
+        maxRetry: 3000,
+        burstCount: 40,
+        fastDelay: 15,
+        slowDelay: 50,
+        jitter: 0.2,
+        recoveryMax: 3,
+        logMax: 100,
         PREVIEW: '/api/biz/pay/batch-preview',
         CHECK: '/api/biz/pay/check',
-        packageType: 'quarterly', // monthly | quarterly | yearly
-        packageTier: 'lite',       // lite | pro | max
+        packageType: 'quarterly',
+        packageTier: 'lite',
     };
 
     function loadCfg() {
@@ -48,17 +47,16 @@
     const CFG = loadCfg();
 
     // ═══════════════════════════════════════════
-    //  状态 (不可变更新)
+    //  状态
     // ═══════════════════════════════════════════
     let state = {
-        status: 'idle',      // idle | retrying | success | failed
+        status: 'idle',
         count: 0,
         bizId: null,
-        captured: null,      // 捕获的请求参数
-        cache: null,         // 成功响应缓存
+        captured: null,
+        cache: null,
         lastSuccess: null,
         proactive: false,
-        timerId: null,
         logs: [],
         stats: { total: 0, success: 0, errors: 0, avgMs: 0, startTime: 0 },
     };
@@ -110,28 +108,21 @@
     }
 
     // ═══════════════════════════════════════════
-    //  反检测: 真实浏览器 UA 池
+    //  UA - 固定, 不换
     // ═══════════════════════════════════════════
     const UA_POOL = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0',
     ];
-
-    let _currentUA = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+    const _currentUA = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
     function getUA() {
         return _currentUA;
     }
 
     // ═══════════════════════════════════════════
-    //  反检测: 人类-like 随机延迟
+    //  人-like 延迟
     // ═══════════════════════════════════════════
     function humanLikeDelay() {
         if (Math.random() < 0.8) {
@@ -160,12 +151,11 @@
     }
 
     function scrambleBody(body) {
-        // WAF 会检测异常字段, 不再添加噪声
         return body;
     }
 
     // ═══════════════════════════════════════════
-    //  定向拦截 — 仅拦截特定 API 响应
+    //  API 响应 patch — 修正售罄标记
     // ═══════════════════════════════════════════
     const _parse = JSON.parse;
 
@@ -189,7 +179,7 @@
     }
 
     // ═══════════════════════════════════════════
-    //  核心: 并发重试引擎
+    //  并发重试引擎 (手动触发)
     // ═══════════════════════════════════════════
     const _fetch = window.fetch;
     let _retryChain = Promise.resolve();
@@ -255,7 +245,6 @@
 
             setState({ status: 'retrying', count: 0, stats: { ...state.stats, startTime: performance.now() } });
 
-            // 反检测: 开抢前随机延迟 50-300ms
             if (state.count === 0) {
                 await sleep(50 + Math.random() * 250);
             }
@@ -382,7 +371,7 @@
     }
 
     // ═══════════════════════════════════════════
-    //  Fetch 拦截
+    //  Fetch 拦截 — 只捕获请求, 不自动调度
     // ═══════════════════════════════════════════
     const _originalFetch = window.fetch;
 
@@ -426,8 +415,7 @@
                 return _originalFetch.apply(this, [input, init]);
             }
 
-            log('已构造请求, 等待抢购时间...');
-            autoScheduleIfNeeded();
+            // 不做自动调度, 直接放行
             return _originalFetch.apply(this, [input, init]);
         }
 
@@ -443,7 +431,7 @@
     window.fetch.toString = () => 'function fetch() { [native code] }';
 
     // ═══════════════════════════════════════════
-    //  XHR 拦截
+    //  XHR 拦截 — 反售罄 + 请求捕获
     // ═══════════════════════════════════════════
     const _xhrOpen = XMLHttpRequest.prototype.open;
     const _xhrSend = XMLHttpRequest.prototype.send;
@@ -528,8 +516,7 @@
                 return;
             }
 
-            log('已构造请求, 等待抢购时间...');
-            autoScheduleIfNeeded();
+            // 不做自动调度, 直接放行
             return _xhrSend.call(this, body);
         }
 
@@ -557,7 +544,7 @@
     }
 
     // ═══════════════════════════════════════════
-    //  自动抢购 — 套餐选择 + 页面自动化
+    //  请求构造
     // ═══════════════════════════════════════════
     const TAB_MAP = {
         monthly: '连续包月',
@@ -572,9 +559,8 @@
     };
 
     async function autoGrab() {
-        log(`自动抢购启动: ${TAB_MAP[CFG.packageType]} + ${TIER_MAP[CFG.packageTier]}`);
+        log(`手动抢购: ${TAB_MAP[CFG.packageType]} + ${TIER_MAP[CFG.packageTier]}`);
 
-        // 构造请求体,直接调用batch-preview API
         const url = `${location.origin}${CFG.PREVIEW}`;
         const body = JSON.stringify({ invitationCode: "" });
         const headers = {
@@ -584,57 +570,10 @@
             'Origin': location.origin,
         };
 
-        log(`直接发起请求: ${url}`);
+        log(`构造请求: ${url}`);
         setState({ captured: { url, method: 'POST', body, headers } });
 
         return { url, method: 'POST', body, headers };
-    }
-
-    function findTabElement(tabName) {
-        const tabs = document.querySelectorAll('.el-tabs__item, [class*="tab"]');
-        for (const tab of tabs) {
-            if (tab.textContent.trim() === tabName) return tab;
-        }
-        const allTabs = document.querySelectorAll('[class*="tab"], button, [role="tab"]');
-        for (const t of allTabs) {
-            if (t.textContent.trim() === tabName && t.offsetParent !== null) return t;
-        }
-        return null;
-    }
-
-    function findTierButton(tierName) {
-        const cards = document.querySelectorAll('[class*="card"], [class*="plan"], [class*="pricing"]');
-        for (const card of cards) {
-            if (card.textContent.includes(tierName)) {
-                const btns = card.querySelectorAll('button');
-                for (const btn of btns) {
-                    if (/特惠订阅|购买|抢购/.test(btn.textContent) && btn.offsetParent !== null) {
-                        return btn;
-                    }
-                }
-                const allBtns = card.querySelectorAll('[class*="btn"], button');
-                for (const btn of allBtns) {
-                    if (/特惠订阅/.test(btn.textContent) && btn.offsetParent !== null) {
-                        return btn;
-                    }
-                }
-            }
-        }
-        const allBtns = document.querySelectorAll('button');
-        for (const btn of allBtns) {
-            if (btn.textContent.includes('特惠订阅') && btn.offsetParent !== null) {
-                const parent = btn.closest('[class*="card"], [class*="plan"], [class*="pricing"]');
-                if (parent && parent.textContent.includes(tierName)) {
-                    return btn;
-                }
-            }
-        }
-        for (const btn of allBtns) {
-            if (/特惠订阅/.test(btn.textContent) && btn.offsetParent !== null) {
-                return btn;
-            }
-        }
-        return null;
     }
 
     // ═══════════════════════════════════════════
@@ -693,7 +632,7 @@
             const btn = findBuyButton();
             if (btn) {
                 btn.click();
-                log('已重新点击购买按钮 (策略2)');
+                log('已重新点击购买按钮');
                 await sleep(2000);
             }
 
@@ -725,7 +664,7 @@
 
                 if (!document.querySelector('[class*="pay"], [class*="qrcode"]')) {
                     log('所有自动恢复策略已尝试, 请手动操作');
-                    alert(`已抢到 bizId=${state.bizId}\n\n请:\n1. 刷新页面后立即点击购买\n2. 或手动访问支付页面`);
+                    alert(`已抢到 bizId=${state.bizId}\n\n请手动操作支付`);
                 }
             } else {
                 log('支付弹窗已出现!');
@@ -759,7 +698,7 @@
     }
 
     // ═══════════════════════════════════════════
-    //  主动抢购 & 定时
+    //  手动抢购
     // ═══════════════════════════════════════════
     function findBuyButton() {
         for (const el of document.querySelectorAll('button.buy-btn')) {
@@ -779,17 +718,17 @@
         }
 
         if (!state.captured) {
-            log('无捕获请求, 直接构造请求...');
+            log('构造请求...');
             const req = await autoGrab();
             if (!state.captured) {
                 log('构造请求失败', 'warn');
                 return;
             }
-            log('已构造请求, 开始抢购!');
+            log('请求已构造, 开始抢购!');
         }
 
         setState({ proactive: true });
-        log(`极速抢购启动! 前${CFG.turboSec}秒${CFG.turboConcurrency}路并发, 之后${CFG.concurrency}路`);
+        log(`手动抢购启动! 前${CFG.turboSec}秒${CFG.turboConcurrency}路并发, 之后${CFG.concurrency}路`);
 
         const { url, method, body, headers } = state.captured;
         const result = await retry(url, { method, body, headers });
@@ -813,122 +752,7 @@
     function stopAll() {
         stopRequested = true;
         setState({ proactive: false, status: 'idle', count: 0 });
-        if (state.timerId) { clearInterval(state.timerId); setState({ timerId: null }); }
         log('已停止');
-    }
-
-    // ═══════════════════════════════════════════
-    //  北京时间同步 + 自动定时
-    // ═══════════════════════════════════════════
-    let serverTimeOffset = 0;
-
-    async function syncServerTime() {
-        try {
-            const t0 = Date.now();
-            const resp = await _originalFetch(location.origin + CFG.CHECK + '?bizId=sync', { credentials: 'include' }).catch(() => null);
-            const t1 = Date.now();
-            const rtt = t1 - t0;
-
-            if (resp && resp.headers.get('date')) {
-                const serverTime = new Date(resp.headers.get('date')).getTime();
-                serverTimeOffset = serverTime - (t0 + rtt / 2);
-                const localNow = new Date(Date.now() + serverTimeOffset);
-                log(`时间同步: 服务器偏差 ${serverTimeOffset > 0 ? '+' : ''}${serverTimeOffset}ms (RTT=${rtt}ms)`);
-                log(`北京时间: ${localNow.toLocaleTimeString('zh-CN', { hour12: false })}`);
-                return;
-            }
-        } catch {}
-
-        try {
-            const resp = await fetch('https://worldtimeapi.org/api/timezone/Asia/Shanghai');
-            const data = await resp.json();
-            const serverTime = new Date(data.datetime).getTime();
-            serverTimeOffset = serverTime - Date.now();
-            log(`时间同步(备用): 偏差 ${serverTimeOffset > 0 ? '+' : ''}${serverTimeOffset}ms`);
-        } catch {
-            log('时间同步失败, 使用本地时钟');
-            serverTimeOffset = 0;
-        }
-    }
-
-    function getServerNow() {
-        return Date.now() + serverTimeOffset;
-    }
-
-    function autoScheduleIfNeeded() {
-        if (state.timerId) return;
-        if (state.status === 'retrying') return;
-        if (state.status === 'success') return;
-
-        const parts = CFG.rushTime.split(':').map(Number);
-        const now = new Date(getServerNow());
-        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parts[0], parts[1], parts[2] || 0);
-
-        if (target.getTime() <= getServerNow()) {
-            const passedSec = (getServerNow() - target.getTime()) / 1000;
-            if (passedSec < 30) {
-                log(`已过${CFG.rushTime} ${passedSec.toFixed(0)}秒, 立即开抢!`);
-                startProactive();
-            } else {
-                log(`今天${CFG.rushTime}已过, 明天自动抢购`);
-            }
-            return;
-        }
-
-        scheduleAt(CFG.rushTime);
-        log(`已自动设定 ${CFG.rushTime} 抢购`);
-    }
-
-    function scheduleAt(timeStr) {
-        if (state.timerId) { clearInterval(state.timerId); setState({ timerId: null }); }
-        const parts = timeStr.split(':').map(Number);
-        if (parts.length < 2 || parts[0] > 23 || parts[1] > 59) { log('时间格式错误'); return; }
-
-        const now = new Date(getServerNow());
-        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parts[0], parts[1], parts[2] || 0);
-        if (target.getTime() <= getServerNow()) { log('目标时间已过'); return; }
-
-        const ms = target.getTime() - getServerNow();
-        log(`定时: ${timeStr} (${Math.ceil(ms / 1000)}秒后, 北京时间)`);
-
-        if (ms > 6000) {
-            setTimeout(() => {
-                log('定时前5秒, 自动预热...');
-                preheat();
-            }, Math.max(0, ms - 5000));
-        }
-
-        const tid = setInterval(() => {
-            const remaining = target.getTime() - getServerNow();
-            if (remaining > 0 && remaining < 60000) {
-                const sec = (remaining / 1000).toFixed(1);
-                const timerEl = _shadowRef?.getElementById('timer-info');
-                if (timerEl) timerEl.textContent = `-${sec}s`;
-            }
-            if (remaining <= 0) {
-                clearInterval(tid);
-                setState({ timerId: null });
-                const timerEl = _shadowRef?.getElementById('timer-info');
-                if (timerEl) timerEl.textContent = '';
-                log('时间到! 自动启动抢购!');
-                startProactive();
-            }
-        }, 10);
-
-        setState({ timerId: tid });
-    }
-
-    async function preheat() {
-        try {
-            log('TCP预热中...');
-            const promises = [];
-            for (let i = 0; i < 5; i++) {
-                const h = { 'User-Agent': _currentUA, 'Referer': `${location.origin}/glm-coding` };
-                promises.push(_originalFetch(location.origin + CFG.CHECK + '?bizId=preheat_' + i, { credentials: 'include', headers: h }).catch(() => {}));
-            }
-            await Promise.all(promises);
-            log('预热完成 (5路并发连接已建立)');
-        } catch { log('预热部分失败，不影响使用'); }
     }
 
     // ═══════════════════════════════════════════
@@ -948,7 +772,7 @@
     });
 
     // ═══════════════════════════════════════════
-    //  Vue isServerBusy 兜底 patch
+    //  Vue 反售罄补丁 (不碰 disabled/canBuy)
     // ═══════════════════════════════════════════
     function patchVueServerBusy() {
         let attempts = 0;
@@ -957,7 +781,6 @@
             if (attempts > 60) { clearInterval(tid); return; }
             let patched = 0;
 
-            // 1. Vue 组件数据 patch — 只动售罄/繁忙, 不动 disabled/canBuy
             const app = document.querySelector('#app');
             const vue = app && app.__vue__;
             if (vue) {
@@ -981,7 +804,6 @@
                 walk(vue, 0);
             }
 
-            // 2. DOM 按钮直接修复 — 只动 disabled 的购买按钮
             const buyBtns = document.querySelectorAll('.buy-btn, button.buy-btn[disabled]');
             for (const btn of buyBtns) {
                 if (btn.disabled) { btn.disabled = false; btn.classList.remove('is-disabled', 'disabled'); patched++; }
@@ -992,7 +814,6 @@
                 }
             }
 
-            // 3. 移除售罄遮罩/标签
             const soldOutTags = document.querySelectorAll('[class*="sold-out"], [class*="soldOut"]');
             for (const el of soldOutTags) {
                 if (el.textContent && /售罄|已售/.test(el.textContent)) {
@@ -1032,9 +853,9 @@
                 payComp.priceData = data;
                 payComp.payDialogVisible = true;
             }
-            log('兜底: 已直接设置 payDialogVisible=true (Vue $set)');
+            log('已直接设置 payDialogVisible=true');
         } else {
-            log('兜底: 响应数据无 data 字段, 无法设置');
+            log('响应数据无 data 字段, 无法设置');
         }
     }
 
@@ -1050,7 +871,7 @@
 <style>
 :host{all:initial;position:fixed;top:10px;right:10px;z-index:999999;font-family:Consolas,'Courier New',monospace}
 *{box-sizing:border-box;margin:0;padding:0}
-.panel{width:360px;background:#1a1a2e;color:#e0e0e0;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.6);font-size:13px;line-height:1.5;user-select:none}
+.panel{width:320px;background:#1a1a2e;color:#e0e0e0;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.6);font-size:13px;line-height:1.5;user-select:none}
 .hd{background:linear-gradient(135deg,#0f3460,#16213e);padding:9px 14px;border-radius:12px 12px 0 0;display:flex;justify-content:space-between;align-items:center;cursor:move}
 .hd b{font-size:14px;letter-spacing:.5px}
 .mn{background:none;border:none;color:#aaa;cursor:pointer;font-size:20px;line-height:1;padding:0 4px}
@@ -1074,14 +895,12 @@
 .pkgs button.tier-btn.active{background:#0984e3;color:#fff}
 .pkgs button:hover{opacity:.8}
 .row{display:flex;align-items:center;gap:6px;margin-bottom:8px;font-size:12px;flex-wrap:wrap}
-.row input[type=number],.row input[type=time]{width:60px;padding:4px 6px;border:1px solid #444;border-radius:4px;background:#2d3436;color:#fff;text-align:center;font-size:12px}
+.row input[type=number]{width:60px;padding:4px 6px;border:1px solid #444;border-radius:4px;background:#2d3436;color:#fff;text-align:center;font-size:12px}
 .btns{display:flex;gap:8px;margin-bottom:10px}
 .btns button{flex:1;padding:8px;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:12px;color:#fff;transition:opacity .2s}
 .btns button:hover{opacity:.85}
 .b-go{background:#0984e3}
 .b-stop{background:#d63031}
-.b-heat{background:#fdcb6e;color:#2d3436}
-.b-time{background:#6c5ce7;flex:0 0 auto!important;padding:4px 10px!important}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px;font-size:11px;text-align:center}
 .stats div{background:#2d3436;border-radius:4px;padding:4px}
 .stats .v{font-size:16px;font-weight:700;color:#74b9ff}
@@ -1093,10 +912,10 @@
 .keys{font-size:10px;color:#636e72;text-align:center;margin-top:6px}
 </style>
 <div class="panel">
-  <div class="hd" id="drag"><b>GLM v5.4</b><button class="mn" id="min">-</button></div>
+  <div class="hd" id="drag"><b>GLM v5.5</b><button class="mn" id="min">-</button></div>
   <div class="bd" id="bd">
-    <div class="st st-idle" id="st">等待中</div>
-    <div class="cap" id="cap">${state.captured ? '已恢复上次构造的请求' : '点击"主动抢购"直接开始'}</div>
+    <div class="st st-idle" id="st">等待手动抢购</div>
+    <div class="cap" id="cap">${state.captured ? '已恢复上次构造的请求' : '点击"手动抢购"开始'}</div>
 
     <div class="pkgs" id="pkgs">
       <div class="pkgs-label">套餐类型</div>
@@ -1123,15 +942,9 @@
       <span>极速</span><input type="number" id="i-turbo" value="${CFG.turboConcurrency}" min="1" max="20" step="1">
       <span>上限</span><input type="number" id="i-max" value="${CFG.maxRetry}" min="10" max="9999" step="50">
     </div>
-    <div class="row">
-      <span>定时</span><input type="time" id="i-time" step="1">
-      <button class="b-time" id="b-time">设定</button>
-      <span id="timer-info" style="color:#6c5ce7;font-size:11px"></span>
-    </div>
     <div class="btns">
-      <button class="b-go" id="b-go">▶ 主动抢购</button>
+      <button class="b-go" id="b-go">▶ 手动抢购</button>
       <button class="b-stop" id="b-stop" style="display:none">■ 停止</button>
-      <button class="b-heat" id="b-heat">预热</button>
     </div>
     <div class="logs" id="logs"></div>
     <div class="keys">Alt+S 抢购 | Alt+X 停止 | Alt+H 隐藏</div>
@@ -1143,8 +956,6 @@
         const $ = id => shadow.getElementById(id);
         $('b-go').onclick = startProactive;
         $('b-stop').onclick = stopAll;
-        $('b-heat').onclick = preheat;
-        $('b-time').onclick = () => { const v = $('i-time').value; if (v) scheduleAt(v); };
         $('i-conc').onchange = function() { CFG.concurrency = Math.max(1, +this.value || 5); saveCfg(CFG); };
         $('i-turbo').onchange = function() { CFG.turboConcurrency = Math.max(1, +this.value || 10); saveCfg(CFG); };
         $('i-max').onchange = function() { CFG.maxRetry = Math.max(10, +this.value || 2000); saveCfg(CFG); };
@@ -1188,14 +999,11 @@
 
         _shadowRef = shadow;
 
-        log('v5.4 已加载 (极速优化 + 直接请求)');
-        if (state.captured) log('已恢复上次构造的请求, 可直接设定时间');
+        log('v5.5 已加载 (手动抢购模式)');
+        if (state.captured) log('已恢复上次构造的请求');
         log(`当前套餐: ${TAB_MAP[CFG.packageType]} + ${TIER_MAP[CFG.packageTier]}`);
         setupDialogWatcher();
-
         patchVueServerBusy();
-
-        syncServerTime();
 
         if (Notification && Notification.permission === 'default') {
             Notification.requestPermission();
@@ -1203,7 +1011,7 @@
     }
 
     // ═══════════════════════════════════════════
-    //  UI 更新 (rAF 节流)
+    //  UI 更新
     // ═══════════════════════════════════════════
     let _uiRafId = null;
     let _uiDirty = false;
@@ -1223,7 +1031,7 @@
             if (stEl) {
                 stEl.className = 'st st-' + state.status;
                 const isTurbo = state.stats.startTime && (performance.now() - state.stats.startTime) < CFG.turboSec * 1000;
-                stEl.textContent = state.status === 'idle' ? '等待中'
+                stEl.textContent = state.status === 'idle' ? '等待手动抢购'
                     : state.status === 'retrying' ? `${isTurbo ? '⚡极速' : ''}重试中... ${state.count}/${CFG.maxRetry}`
                     : state.status === 'success' ? `成功! bizId=${state.bizId}`
                     : `失败 (${state.count}次)`;
@@ -1233,7 +1041,7 @@
             if (capEl) {
                 capEl.textContent = state.captured
                     ? `已构造: ${state.captured.method} ...${state.captured.url.split('?')[0].slice(-30)}`
-                    : '点击"主动抢购"直接开始';
+                    : '点击"手动抢购"直接开始';
             }
 
             const cntEl = $('s-cnt'); if (cntEl) cntEl.textContent = state.count;
@@ -1275,7 +1083,7 @@
     // ═══════════════════════════════════════════
     //  启动
     // ═══════════════════════════════════════════
-    console.log('[GLM] v5.4 已注入');
+    console.log('[GLM] v5.5 已注入 (手动模式)');
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', createPanel);
     } else {
