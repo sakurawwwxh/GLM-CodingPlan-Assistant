@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         智谱 GLM Coding 按钮修复 v5.7
+// @name         智谱 GLM Coding 按钮修复 v5.8
 // @namespace    http://tampermonkey.net/
-// @version      5.6
+// @version      5.8
 // @description  仅修复售罄按钮, 不发任何请求, 不封IP
 // @author       Assistant
 // @match        *://www.bigmodel.cn/*
@@ -13,7 +13,16 @@
 (function () {
     'use strict';
 
-    console.log('[GLM] v5.7 按钮修复模式已注入');
+    console.log('[GLM] v5.8 按钮修复模式已注入 (订单接口已保护)');
+
+    // ═══════════════════════════════════════════
+    //  URL 过滤 — 支付/订单接口不拦截
+    // ═══════════════════════════════════════════
+    const SKIP_PATTERNS = ['/api/biz/pay/', '/api/biz/order/'];
+    function shouldSkipPatch(url) {
+        if (typeof url !== 'string') return true;
+        return SKIP_PATTERNS.some(p => url.includes(p));
+    }
 
     // ═══════════════════════════════════════════
     //  patchSoldOut — 递归修正售罄标记
@@ -40,11 +49,17 @@
         const resp = await _originalFetch.apply(this, arguments);
         const ct = resp.headers.get('content-type') || '';
         if (!ct.includes('json')) return resp;
+        const url = typeof input === 'string' ? input : (input && input.url || '');
+        if (shouldSkipPatch(url)) {
+            console.log('[GLM] SKIP fetch:', url);
+            return resp;
+        }
         try {
             const text = await resp.text();
             try {
                 const data = JSON.parse(text);
                 patchSoldOut(data);
+                console.log('[GLM] PATCH fetch:', url);
                 return new Response(JSON.stringify(data), {
                     status: resp.status,
                     statusText: resp.statusText,
@@ -88,10 +103,15 @@
 
         const patchResponse = function() {
             if (self.readyState === 4 && self.responseText) {
+                if (shouldSkipPatch(url)) {
+                    console.log('[GLM] SKIP xhr:', url);
+                    return;
+                }
                 try {
                     const data = JSON.parse(self.responseText);
                     patchSoldOut(data);
                     const patched = JSON.stringify(data);
+                    console.log('[GLM] PATCH xhr:', url);
                     Object.defineProperty(self, 'responseText', {
                         get: function() { return patched; },
                         configurable: true, enumerable: true,
